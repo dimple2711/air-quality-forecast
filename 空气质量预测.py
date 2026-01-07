@@ -1,199 +1,232 @@
 import pandas as pd
 import numpy as np
+from sklearn.model_selection import train_test_split
+from sklearn.ensemble import RandomForestRegressor
+from sklearn.preprocessing import StandardScaler
+from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
 import matplotlib.pyplot as plt
+import joblib
 
 # 设置中文字体 - 使用系统支持的字体
 plt.rcParams['font.sans-serif'] = ['Microsoft YaHei', 'SimHei', 'DejaVu Sans']
 plt.rcParams['axes.unicode_minus'] = False
 
-# 简单的梯度下降线性回归
-class SimpleLinearRegressionGD:
-    def __init__(self, learning_rate=0.01, n_iterations=1000):
-        self.learning_rate = learning_rate
-        self.n_iterations = n_iterations
-        self.weights = None
-        self.bias = None
-        self.loss_history = []
+# 1. 数据加载
+data = pd.read_excel(r"D:\202330906135张雨桐\空气质量预测代码\空气质量数据\AirQualityUCI.xlsx")
+print(f"数据列名: {data.columns.tolist()}")
 
-    # 训练模型
-    def fit(self, X, y):
-        n_samples, n_features = X.shape
+# 2. 数据预处理
+# 处理日期时间列
+data['Datetime'] = pd.to_datetime(data['Date'].astype(str) + ' ' + data['Time'].astype(str))
+# 提取时间特征
+data['Hour'] = data['Datetime'].dt.hour
+data['DayOfWeek'] = data['Datetime'].dt.dayofweek
+data['Month'] = data['Datetime'].dt.month
+data['Day'] = data['Datetime'].dt.day
+data['Year'] = data['Datetime'].dt.year
+data['IsWeekend'] = data['DayOfWeek'].isin([5, 6]).astype(int)
 
-        # 初始化参数
-        self.weights = np.zeros(n_features)
-        self.bias = 0
+# 异常值处理
+numeric_cols = data.select_dtypes(include=[np.number]).columns.tolist()
+time_feature_cols = ['Hour', 'DayOfWeek', 'Month', 'Day', 'Year', 'IsWeekend']
+original_numeric_cols = [col for col in numeric_cols if col not in time_feature_cols]
 
-        # 梯度下降
-        for i in range(self.n_iterations):
-            # 预测
-            y_pred = np.dot(X, self.weights) + self.bias
-
-            # 计算损失
-            loss = np.mean((y_pred - y) ** 2) / 2
-            self.loss_history.append(loss)
-
-            # 计算梯度
-            dw = np.dot(X.T, (y_pred - y)) / n_samples
-            db = np.sum(y_pred - y) / n_samples
-
-            # 更新参数
-            self.weights -= self.learning_rate * dw
-            self.bias -= self.learning_rate * db
-
-        return self
-
-    # 预测
-    def predict(self, X):
-        return np.dot(X, self.weights) + self.bias
-
-# 简单的IQR异常值处理
-def simple_outlier_handling(data, column):
-    Q1 = data[column].quantile(0.25)
-    Q3 = data[column].quantile(0.75)
+def handle_outliers(df, column):
+    # 计算统计指标
+    Q1 = df[column].quantile(0.25)
+    Q3 = df[column].quantile(0.75)
     IQR = Q3 - Q1
 
-    # 计算边界
+    # 定义异常值边界
     lower_bound = Q1 - 1.5 * IQR
     upper_bound = Q3 + 1.5 * IQR
 
-    # 将异常值替换为边界值
-    data[column] = np.clip(data[column], lower_bound, upper_bound)
-    return data
+    # 识别异常值
+    outliers_mask = (df[column] < lower_bound) | (df[column] > upper_bound)
 
-# 评估模型
-def evaluate_model(y_true, y_pred):
-    # R²
-    ss_res = np.sum((y_true - y_pred) ** 2)
-    ss_tot = np.sum((y_true - np.mean(y_true)) ** 2)
-    r2 = 1 - (ss_res / ss_tot)
+    if outliers_mask.any():
+        # 用中位数替换异常值
+        median_val = df[column].median()
+        df.loc[outliers_mask, column] = median_val
+        return outliers_mask.sum()
+    return 0
 
-    # RMSE
-    rmse = np.sqrt(np.mean((y_true - y_pred) ** 2))
+# 应用异常值处理
+total_outliers = 0
+for col in original_numeric_cols:
+    outliers_count = handle_outliers(data, col)
+    total_outliers += outliers_count
 
-    # MAE
-    mae = np.mean(np.abs(y_true - y_pred))
+print(f"\n总共处理了 {total_outliers} 个异常值")
 
-    # 准确率
-    errors = np.abs((y_true - y_pred) / y_true)
-    accuracy = np.mean(errors <= 0.1) * 100
+# 选择特征和目标变量
+target_column = 'CO(GT)'
 
-    return r2, rmse, mae, accuracy
+# 排除不需要的列
+exclude_cols = ['Date', 'Time', 'Datetime', target_column]
+feature_cols = [col for col in data.columns if col not in exclude_cols]
 
-def main():
-    # 加载数据
-    df = pd.read_excel(r"D:\202330906135张雨桐\空气质量预测代码\空气质量数据\AirQualityUCI.xlsx")
+X = data[feature_cols]
+y = data[target_column]
 
-    print(f"原始数据形状: {df.shape}")
+# 检查缺失值并处理
+missing_values = X.isnull().sum()
+if missing_values.sum() > 0:
+    print(f"发现缺失值: {missing_values[missing_values > 0].to_dict()}")
+    X = X.fillna(X.median())
+    print("已使用中位数填充缺失值")
 
-    # 简单的异常值处理
-    numeric_cols = df.select_dtypes(include=[np.number]).columns
+# 数据标准化
+scaler = StandardScaler()
+X_scaled = scaler.fit_transform(X)
 
-    for col in numeric_cols:
-        df = simple_outlier_handling(df, col)
+# 划分训练集和测试集
+X_train, X_test, y_train, y_test = train_test_split(
+    X_scaled, y, test_size=0.2, random_state=42, shuffle=True
+)
 
-    # 特征选择
-    features = ['PT08.S2(NMHC)', 'NOx(GT)', 'C6H6(GT)', 'NO2(GT)',
-                'PT08.S1(CO)', 'T', 'PT08.S5(O3)', 'PT08.S4(NO2)',
-                'PT08.S3(NOx)']
+print(f"训练集大小: {X_train.shape}")
+print(f"测试集大小: {X_test.shape}")
 
-    # 检查哪些特征存在
-    features = [f for f in features if f in df.columns]
-    print(f"使用的特征: {features}")
+# 模型训练
+rf_model = RandomForestRegressor(
+    n_estimators=200,
+    max_depth=15,
+    min_samples_split=5,
+    min_samples_leaf=2,
+    random_state=42,
+    n_jobs=-1
+)
 
-    # 目标变量
-    target = 'CO(GT)'
+rf_model.fit(X_train, y_train)
 
-    # 准备数据
-    X = df[features].values
-    y = df[target].values
+# 模型评估
+y_pred = rf_model.predict(X_test)
 
-    # 标准化
-    X_mean = np.mean(X, axis=0)
-    X_std = np.std(X, axis=0)
-    X = (X - X_mean) / X_std
+mse = mean_squared_error(y_test, y_pred)
+rmse = np.sqrt(mse)
+mae = mean_absolute_error(y_test, y_pred)
+r2 = r2_score(y_test, y_pred)
 
-    # 训练测试分割
-    np.random.seed(42)
-    indices = np.random.permutation(len(X))
-    split = int(0.8 * len(X))
+print(f"\n模型性能评估:")
+print(f"R²分数: {r2:.4f}")
+print(f"均方根误差(RMSE): {rmse:.4f}")
+print(f"平均绝对误差(MAE): {mae:.4f}")
 
-    X_train, X_test = X[indices[:split]], X[indices[split:]]
-    y_train, y_test = y[indices[:split]], y[indices[split:]]
+# 计算预测准确率
+accuracy_threshold = 0.1  # 10%误差范围
+accurate_predictions = np.sum(np.abs((y_test - y_pred) / y_test) <= accuracy_threshold)
+accuracy_rate = accurate_predictions / len(y_test) * 100
+print(f"预测准确率(误差≤10%): {accuracy_rate:.2f}%")
 
-    print(f"\n训练集: {X_train.shape}, 测试集: {X_test.shape}")
+# 特征重要性分析
+feature_importance = pd.DataFrame({
+    '特征': feature_cols,
+    '重要性': rf_model.feature_importances_
+}).sort_values('重要性', ascending=False)
 
-    # 训练模型
-    model = SimpleLinearRegressionGD(learning_rate=0.05, n_iterations=1500)
-    model.fit(X_train, y_train)
+print("\n前10个最重要的特征:")
+for i, row in feature_importance.head(10).iterrows():
+    print(f"{row['特征']}: {row['重要性']:.4f}")
 
-    # 预测和评估
-    y_pred = model.predict(X_test)
-    r2, rmse, mae, accuracy = evaluate_model(y_test, y_pred)
+# 可视化特征重要性
+plt.figure(figsize=(12, 8))
+bars = plt.barh(feature_importance['特征'][:15], feature_importance['重要性'][:15])
+plt.xlabel('特征重要性', fontsize=12)
+plt.ylabel('特征名称', fontsize=12)
+plt.title('空气质量预测 - 特征重要性排名(前15个)', fontsize=14, fontweight='bold')
+plt.gca().invert_yaxis()
 
-    print(f"\nR²分数: {r2:.4f}")
-    print(f"RMSE: {rmse:.4f}")
-    print(f"MAE: {mae:.4f}")
-    print(f"准确率(误差≤10%): {accuracy:.2f}%")
+# 在柱状图上添加数值标签
+for bar in bars:
+    width = bar.get_width()
+    plt.text(width + 0.001, bar.get_y() + bar.get_height() / 2,
+             f'{width:.4f}', ha='left', va='center')
 
-    # 特征重要性
-    feature_importance = np.abs(model.weights)
-    feature_importance = feature_importance / np.sum(feature_importance)
+plt.tight_layout()
+plt.savefig('特征重要性.png', dpi=300, bbox_inches='tight')
+print("\n特征重要性图已保存为 '特征重要性.png'")
 
-    importance_df = pd.DataFrame({
-        '特征': features,
-        '重要性': feature_importance
-    }).sort_values('重要性', ascending=False)
+# 可视化预测结果
+fig, axes = plt.subplots(2, 2, figsize=(15, 12))
 
-    print("\n特征重要性分析")
-    print(importance_df.to_string(index=False))
+# 实际值与预测值的散点图：
+axes[0, 0].scatter(y_test, y_pred, alpha=0.6, color='blue', edgecolors='black', linewidth=0.5)
+axes[0, 0].plot([y_test.min(), y_test.max()], [y_test.min(), y_test.max()], 'r--', lw=2)
+axes[0, 0].set_xlabel('实际值', fontsize=11)
+axes[0, 0].set_ylabel('预测值', fontsize=11)
+axes[0, 0].set_title('实际值与预测值的散点图', fontsize=12, fontweight='bold')
+axes[0, 0].grid(True, alpha=0.3)
 
-    # 可视化
-    plt.figure(figsize=(15, 4))
+# 残差图
+residuals = y_test - y_pred
+axes[0, 1].scatter(y_pred, residuals, alpha=0.6, color='green', edgecolors='black', linewidth=0.5)
+axes[0, 1].axhline(y=0, color='r', linestyle='--', linewidth=2)
+axes[0, 1].set_xlabel('预测值', fontsize=11)
+axes[0, 1].set_ylabel('残差', fontsize=11)
+axes[0, 1].set_title('残差分布图', fontsize=12, fontweight='bold')
+axes[0, 1].grid(True, alpha=0.3)
 
-    # 损失曲线
-    plt.subplot(131)
-    plt.plot(model.loss_history)
-    plt.title('损失曲线')
-    plt.xlabel('迭代次数')
-    plt.ylabel('损失')
+# 预测对比折线图
+sample_indices = np.arange(min(50, len(y_test)))
+axes[1, 0].plot(sample_indices, y_test.values[:50], label='实际值',
+                marker='o', markersize=4, linewidth=2, alpha=0.8)
+axes[1, 0].plot(sample_indices, y_pred[:50], label='预测值',
+                marker='s', markersize=4, linewidth=2, alpha=0.8, linestyle='--')
+axes[1, 0].set_xlabel('样本序号', fontsize=11)
+axes[1, 0].set_ylabel('CO(GT)浓度', fontsize=11)
+axes[1, 0].set_title('前50个样本预测对比', fontsize=12, fontweight='bold')
+axes[1, 0].legend()
+axes[1, 0].grid(True, alpha=0.3)
 
-    # 预测值与真实值的对比
-    plt.subplot(132)
-    plt.scatter(y_test, y_pred, alpha=0.6)
-    plt.plot([y_test.min(), y_test.max()], [y_test.min(), y_test.max()], 'r--')
-    plt.xlabel('真实值')
-    plt.ylabel('预测值')
-    plt.title('预测值与真实值的对比')
+# 误差分布直方图
+error_percentage = np.abs((y_test - y_pred) / y_test) * 100
+axes[1, 1].hist(error_percentage, bins=30, alpha=0.7, color='orange', edgecolor='black')
+axes[1, 1].axvline(x=10, color='red', linestyle='--', linewidth=2, label='10%误差线')
+axes[1, 1].set_xlabel('预测误差百分比 (%)', fontsize=11)
+axes[1, 1].set_ylabel('样本数量', fontsize=11)
+axes[1, 1].set_title('预测误差分布', fontsize=12, fontweight='bold')
+axes[1, 1].legend()
+axes[1, 1].grid(True, alpha=0.3)
 
-    # 特征重要性
-    plt.subplot(133)
-    plt.barh(range(len(features)), importance_df['重要性'].values)
-    plt.yticks(range(len(features)), importance_df['特征'].values)
-    plt.xlabel('重要性')
-    plt.title('特征重要性')
-    plt.gca().invert_yaxis()
+plt.suptitle('空气质量预测模型结果分析', fontsize=16, fontweight='bold', y=1.02)
+plt.tight_layout()
+plt.savefig('预测结果分析.png', dpi=300, bbox_inches='tight')
+print("预测结果分析图已保存为 '预测结果分析.png'")
 
-    plt.tight_layout()
-    plt.savefig('空气质量预测结果.png', dpi=300)
-    plt.show()
+# 保存结果（移除了模型文件保存）
+feature_importance.to_csv('特征重要性.csv', index=False, encoding='utf-8-sig')
 
-    # 保存结果
-    importance_df.to_csv('特征重要性.csv', index=False, encoding='utf-8-sig')
+results_df = pd.DataFrame({
+    '实际值': y_test.values,
+    '预测值': y_pred,
+    '误差': y_test.values - y_pred,
+    '绝对误差': np.abs(y_test.values - y_pred),
+    '误差百分比': np.abs((y_test.values - y_pred) / y_test.values) * 100
+})
+results_df.to_csv('预测结果.csv', index=False, encoding='utf-8-sig')
 
-    results_df = pd.DataFrame({
-        '真实值': y_test,
-        '预测值': y_pred,
-        '误差': y_test - y_pred
-    })
-    results_df.to_csv('预测结果.csv', index=False, encoding='utf-8-sig')
+print("特征重要性: 特征重要性.csv")
+print("预测结果: 预测结果.csv")
 
-    print("\n结果已保存：")
-    print("空气质量预测结果.png")
-    print("特征重要性.csv")
-    print("预测结果.csv")
+print(f"\n模型训练完成!")
+print(f"最终R²分数: {r2:.4f}")
+print(f"预测准确率(误差≤10%): {accuracy_rate:.2f}%")
 
-    return model, r2, rmse, mae, accuracy
+# 显示图表
+plt.show()
 
+# 查看目标变量的分布
+print(f"\n目标变量统计:")
+print(f"  最小值: {y.min():.2f}")
+print(f"  最大值: {y.max():.2f}")
+print(f"  平均值: {y.mean():.2f}")
+print(f"  标准差: {y.std():.2f}")
+print(f"  变异系数(CV): {y.std()/y.mean()*100:.2f}%")
 
-if __name__ == "__main__":
-    model, r2, rmse, mae, accuracy = main()
+# 检查异常值
+Q1 = y.quantile(0.25)
+Q3 = y.quantile(0.75)
+IQR = Q3 - Q1
+outliers_ratio = ((y < (Q1 - 1.5*IQR)) | (y > (Q3 + 1.5*IQR))).sum() / len(y) * 100
+print(f"  异常值比例: {outliers_ratio:.2f}%")
